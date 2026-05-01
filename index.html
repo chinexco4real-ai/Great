@@ -35,7 +35,12 @@
   ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px}
   ::-webkit-scrollbar-thumb:hover{background:#3a5580}
 
-  /* ─── CONNECTION BAR (inline, not overlay) ─── */
+  /* ─── SESSION TIMER ─── */
+  .session-timer{display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 18px;background:rgba(0,240,255,.05);border:1px solid rgba(0,240,255,.18);border-radius:9px;min-width:110px;}
+  .session-timer .st-lbl{font-size:9px;letter-spacing:2px;color:#8ba4cc;text-transform:uppercase;font-weight:700;}
+  .session-timer .st-val{font-family:'Orbitron',sans-serif;font-size:17px;font-weight:700;color:var(--accent2);letter-spacing:2px;text-shadow:0 0 10px rgba(0,240,255,.4);transition:color .3s;}
+  .session-timer.disconnected .st-val{color:#ff6b85;text-shadow:0 0 10px rgba(255,61,90,.4);}
+  .session-timer .st-sub{font-size:9px;color:#8ba4cc;letter-spacing:1px;font-weight:600;}
   #connectionBar{background:linear-gradient(135deg,var(--bg2) 0%,#0d1628 100%);border-bottom:2px solid var(--border2);padding:16px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;box-shadow:0 4px 20px rgba(0,0,0,.4);}
   #connectionBar::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 80% 200% at 50% 50%,rgba(45,139,255,.04) 0%,transparent 70%);pointer-events:none;}
   .conn-brand{display:flex;flex-direction:column;gap:2px;min-width:140px;}
@@ -305,6 +310,12 @@
     </div>
     <!-- After login, show account info + logout here -->
     <div id="hdrAccountArea" style="display:none;margin-left:auto;display:none;align-items:center;gap:14px;">
+      <!-- SESSION TIMER -->
+      <div class="session-timer" id="sessionTimerBox">
+        <span class="st-lbl">Session</span>
+        <span class="st-val" id="sessionTimerVal">00:00:00</span>
+        <span class="st-sub" id="sessionTimerSub">LIVE</span>
+      </div>
       <div class="acct-info">
         <div class="name" id="hdrName">—</div>
         <div class="bal" id="hdrBal">$0.00</div>
@@ -564,6 +575,38 @@
 
 const STORAGE_KEY = 'crt_ea_state';
 let ws = null;
+
+// ─── SESSION TIMER ─────────────────────────────────
+let sessionStartTime = null;
+let sessionTimerInterval = null;
+
+function startSessionTimer(){
+  stopSessionTimer();
+  sessionStartTime = Date.now();
+  const box = document.getElementById('sessionTimerBox');
+  const sub = document.getElementById('sessionTimerSub');
+  if(box) box.classList.remove('disconnected');
+  if(sub) sub.textContent = 'LIVE';
+  sessionTimerInterval = setInterval(()=>{
+    const elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
+    const h = String(Math.floor(elapsed / 3600)).padStart(2,'0');
+    const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2,'0');
+    const s = String(elapsed % 60).padStart(2,'0');
+    const el = document.getElementById('sessionTimerVal');
+    if(el) el.textContent = `${h}:${m}:${s}`;
+  }, 1000);
+}
+
+function stopSessionTimer(){
+  if(sessionTimerInterval){ clearInterval(sessionTimerInterval); sessionTimerInterval = null; }
+  sessionStartTime = null;
+  const el = document.getElementById('sessionTimerVal');
+  const box = document.getElementById('sessionTimerBox');
+  const sub = document.getElementById('sessionTimerSub');
+  if(el) el.textContent = '00:00:00';
+  if(box) box.classList.add('disconnected');
+  if(sub) sub.textContent = 'RESET';
+}
 let apiToken = '';
 let serverUrl = '';
 let botRunning = false;   // autoBot running flag
@@ -714,6 +757,7 @@ function doLogout(){
   autoBot = false;
   botRunning = false;
   if(ws){ ws.close(); ws=null; }
+  stopSessionTimer();
   apiToken='';
   enableTradeButtons(false);
   const tog = document.getElementById('autoToggle');
@@ -763,6 +807,7 @@ function connectWS(isLoginFlow=false){
 
   ws.onclose = () => {
     setDot('error');
+    stopSessionTimer();
     setBotStatus('Disconnected.','error');
     enableTradeButtons(false);
     if(botRunning || autoBot){ setTimeout(()=>{ connectWS(false); },3000); }
@@ -787,6 +832,7 @@ function handleMsg(msg, isLoginFlow){
         // Switch connection bar to "connected" state — show account info
         const accArea = document.getElementById('hdrAccountArea');
         if(accArea){ accArea.style.display='flex'; }
+        startSessionTimer();
         loadState();
         // Start tick feed immediately using selected symbol
         startTickFeed();
