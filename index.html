@@ -510,7 +510,7 @@
         <div class="panel-hdr"><h3>SIGNAL & TRADE LOG</h3><span style="font-size:12px;color:#8ba4cc;cursor:pointer;font-weight:700;letter-spacing:1px;text-transform:uppercase;" onclick="clearLog()">clear</span></div>
         <div class="log-wrap">
           <table>
-            <thead><tr><th>Time</th><th>Signal</th><th>Entry</th><th>Market</th><th>Result</th><th>P&amp;L</th></tr></thead>
+            <thead><tr><th>#</th><th>Time</th><th>Signal</th><th>Entry</th><th>Market</th><th>Result</th><th>P&amp;L</th></tr></thead>
             <tbody id="logBody"></tbody>
           </table>
         </div>
@@ -1138,16 +1138,29 @@ function canOpenSell(){
 
 // ─── PROCESS BUY SIGNAL ───────────────────────────
 function processBuySignal(candle, symbol){
+  // Determine final direction after reverse mode first
+  const finalType = applyReverse('CALL');
+  const finalDir  = finalType === 'CALL' ? 'BUY' : 'SELL';
+
+  // ── Silent skip if max positions reached — do NOT log or count ──
+  const canOpen = finalType==='CALL' ? canOpenBuy() : canOpenSell();
+  if(!canOpen){
+    setBotStatus((finalDir)+' skipped – max positions reached','');
+    toast('⛔ Max positions reached — '+finalDir+' signal blocked silently','info');
+    return;
+  }
+
+  // ── Cooldown check ──
+  if(isCoolingDown()){
+    toast('⏱ Cooldown active — BUY signal skipped','info');
+    return;
+  }
+
+  // ── Count signal only when it will actually be acted on ──
   stats.totalSignals++;
   stats.buySigs++;
   stats.lastSignal = 'BUY';
   stats.lastTime = new Date().toLocaleTimeString();
-
-  if(isCoolingDown()){
-    toast('⏱ Cooldown active — BUY signal skipped','info');
-    updateStats(); saveState();
-    return;
-  }
 
   const entry = candle.close;
   const stake = parseFloat(v('cfgStake'))||1;
@@ -1155,11 +1168,6 @@ function processBuySignal(candle, symbol){
   const tp    = parseFloat(v('cfgTP'))||0;
   const mktLabel = getMarketLabel(symbol);
 
-  // Determine final direction after reverse mode
-  const finalType = applyReverse('CALL');
-  const finalDir  = finalType === 'CALL' ? 'BUY' : 'SELL';
-
-  // Add to log as pending
   const logEntry = {
     id: Date.now(), time: new Date().toLocaleTimeString(),
     dir: finalDir, entry:entry.toFixed(5),
@@ -1172,40 +1180,43 @@ function processBuySignal(candle, symbol){
   const toastDir = finalType==='CALL' ? '🔵 CRT RISE Signal' : '🔴 CRT FALL Signal (REVERSED)';
   toast(toastDir+' @ '+entry.toFixed(5), finalType==='CALL'?'buy':'sell');
 
-  if(finalType==='CALL' ? canOpenBuy() : canOpenSell()){
-    placeTrade(finalType, symbol, stake, sl, tp, logEntry.id);
-    startCooldown();
-  } else {
-    logEntry.result='SKIP';
-    setBotStatus((finalType==='CALL'?'BUY':'SELL')+' skipped – max positions reached','');
-    rebuildLog();
-  }
+  placeTrade(finalType, symbol, stake, sl, tp, logEntry.id);
+  startCooldown();
 
   updateStats(); saveState();
 }
 
 // ─── PROCESS SELL SIGNAL ──────────────────────────
 function processSellSignal(candle, symbol){
+  // Determine final direction after reverse mode first
+  const finalType = applyReverse('PUT');
+  const finalDir  = finalType === 'PUT' ? 'SELL' : 'BUY';
+
+  // ── Silent skip if max positions reached — do NOT log or count ──
+  const canOpen = finalType==='PUT' ? canOpenSell() : canOpenBuy();
+  if(!canOpen){
+    setBotStatus((finalDir)+' skipped – max positions reached','');
+    toast('⛔ Max positions reached — '+finalDir+' signal blocked silently','info');
+    return;
+  }
+
+  // ── Cooldown check ──
+  if(isCoolingDown()){
+    toast('⏱ Cooldown active — SELL signal skipped','info');
+    return;
+  }
+
+  // ── Count signal only when it will actually be acted on ──
   stats.totalSignals++;
   stats.sellSigs++;
   stats.lastSignal = 'SELL';
   stats.lastTime = new Date().toLocaleTimeString();
-
-  if(isCoolingDown()){
-    toast('⏱ Cooldown active — SELL signal skipped','info');
-    updateStats(); saveState();
-    return;
-  }
 
   const entry = candle.close;
   const stake = parseFloat(v('cfgStake'))||1;
   const sl    = parseFloat(v('cfgSL'))||0;
   const tp    = parseFloat(v('cfgTP'))||0;
   const mktLabel = getMarketLabel(symbol);
-
-  // Determine final direction after reverse mode
-  const finalType = applyReverse('PUT');
-  const finalDir  = finalType === 'PUT' ? 'SELL' : 'BUY';
 
   const logEntry = {
     id: Date.now(), time: new Date().toLocaleTimeString(),
@@ -1219,14 +1230,8 @@ function processSellSignal(candle, symbol){
   const toastDir = finalType==='PUT' ? '🔴 CRT FALL Signal' : '🔵 CRT RISE Signal (REVERSED)';
   toast(toastDir+' @ '+entry.toFixed(5), finalType==='PUT'?'sell':'buy');
 
-  if(finalType==='PUT' ? canOpenSell() : canOpenBuy()){
-    placeTrade(finalType, symbol, stake, sl, tp, logEntry.id);
-    startCooldown();
-  } else {
-    logEntry.result='SKIP';
-    setBotStatus((finalType==='PUT'?'SELL':'BUY')+' skipped – max positions reached','');
-    rebuildLog();
-  }
+  placeTrade(finalType, symbol, stake, sl, tp, logEntry.id);
+  startCooldown();
 
   updateStats(); saveState();
 }
@@ -1597,12 +1602,15 @@ function setText(id,val){ document.getElementById(id).textContent=val; }
 // ─── REBUILD LOG TABLE ────────────────────────────
 function rebuildLog(){
   const tbody = document.getElementById('logBody');
-  tbody.innerHTML = tradeLog.slice(0,100).map(l=>{
+  const visible = tradeLog.slice(0,100);
+  tbody.innerHTML = visible.map((l, idx)=>{
+    const sn = idx + 1;
     const dirTag = l.dir==='BUY'?'<span class="tag-buy">BUY</span>':'<span class="tag-sell">SELL</span>';
     const resCls = l.result==='WIN'?'tag-win':l.result==='LOSS'?'tag-loss':l.result==='OPEN'?'tag-open':l.result==='?'?'tag-open':'';
     const resDisplay = l.result === '?' ? '?' : l.result;
     const pnlCls = l.pnl&&l.pnl.startsWith('+')?'tag-win':l.pnl&&l.pnl!=='—'?'tag-loss':'';
     return `<tr>
+      <td style="color:#8ba4cc;font-size:11px;letter-spacing:.5px;">${sn}</td>
       <td>${l.time}</td><td>${dirTag}</td><td>${l.entry}</td>
       <td>${l.market||'—'}</td>
       <td class="${resCls}" title="${l.result==='?'?'Result unknown – re-polling…':''}">${resDisplay}</td>
