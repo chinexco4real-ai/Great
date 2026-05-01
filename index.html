@@ -480,7 +480,7 @@
           <div class="ticker-meta">
             <span><span class="tm-lbl">Session High</span><span class="tm-val" id="tickerHigh">—</span></span>
             <span><span class="tm-lbl">Session Low</span><span class="tm-val" id="tickerLow">—</span></span>
-            <span><span class="tm-lbl">Candles</span><span class="tm-val" id="tickerCandles">0</span></span>
+            <span><span class="tm-lbl" id="candlesLbl">Candles</span><span class="tm-val" id="tickerCandles">0</span></span>
             <span><span class="tm-lbl">Last Update</span><span class="tm-val" id="tickerTime">—</span></span>
           </div>
         </div>
@@ -910,36 +910,39 @@ function subscribeTicks(symbol){
 }
 
 // ─── TICK → CANDLE BUILDING ────────────────────────
-// We build pseudo-candles from tick data.
 // IMPORTANT: Analysis candle size is INDEPENDENT of trade duration.
-// analysisCandleMode='tick'   → candle closes every N ticks (N = analysisCandleTF tick count)
-// analysisCandleMode='candle' → candle closes based on analysisCandleTF timeframe (30s/1m/5m/15m)
+// analysisCandleMode='tick'   → candle closes every 5 ticks; counter shows ticks in current candle
+// analysisCandleMode='candle' → candle closes on real clock boundaries (e.g. :00, :01, :02…)
+//                               counter shows completed OHLC candles
 
-const TICKS_PER_CANDLE_DEFAULT = 5;
-
-// Returns seconds for the selected analysis candle timeframe
+// Returns period seconds for the selected timeframe
 function getAnalysisCandleSeconds(){
   switch(analysisCandleTF){
     case '30s': return 30;
     case '1m':  return 60;
     case '5m':  return 300;
     case '15m': return 900;
-    default:    return 300;
+    default:    return 60;
   }
 }
 
-// Returns tick count used when in TICK analysis mode (fixed 5-tick candles)
+// Returns the floored boundary epoch for a given epoch and period (real clock alignment)
+function getCandleBoundary(epoch, periodSec){
+  return Math.floor(epoch / periodSec) * periodSec;
+}
+
+// Returns tick count per candle in tick mode
 function getAnalysisTickCount(){ return 5; }
 
 function getCandleSize(){
-  // This function is now ONLY used for trade duration (legacy, keeps placeTrade working)
+  // Legacy — used only for trade duration
   const dur = parseInt(v('cfgDuration'))||5;
   return Math.max(1,dur);
 }
 
 function handleTick(tick){
   const price = parseFloat(tick.quote);
-  const epoch = tick.epoch;
+  const epoch = tick.epoch;   // server epoch in seconds
   const pipSz = tick.pip_size || 2;
 
   // ── Update session H/L ──
@@ -957,37 +960,66 @@ function handleTick(tick){
   document.getElementById('tickerLow').textContent  = sessionLow.toFixed(pipSz);
   document.getElementById('tickerTime').textContent = new Date().toLocaleTimeString();
 
-  // ── Build ANALYSIS candle (independent of trade duration) ──
+  // ── Build ANALYSIS candle ──
   let shouldClose = false;
-  if(!currentCandle){
-    currentCandle = {open:price,high:price,low:price,close:price,epoch,ticks:1,startEpoch:epoch};
-    tickCount = 1;
-  } else {
-    currentCandle.high = Math.max(currentCandle.high, price);
-    currentCandle.low  = Math.min(currentCandle.low, price);
-    currentCandle.close = price;
-    tickCount++;
-    currentCandle.ticks = tickCount;
-  }
 
   if(analysisCandleMode === 'tick'){
-    // Tick mode: close candle every N ticks
+    // ── TICK MODE: group every N ticks, show tick progress in counter ──
+    if(!currentCandle){
+      currentCandle = {open:price,high:price,low:price,close:price,epoch,ticks:1,startEpoch:epoch};
+      tickCount = 1;
+    } else {
+      currentCandle.high  = Math.max(currentCandle.high, price);
+      currentCandle.low   = Math.min(currentCandle.low, price);
+      currentCandle.close = price;
+      tickCount++;
+      currentCandle.ticks = tickCount;
+    }
+    // Show ticks accumulated in the current forming candle
+    document.getElementById('tickerCandles').textContent = tickCount + ' ticks';
     shouldClose = (tickCount >= getAnalysisTickCount());
-  } else {
-    // Candle mode: close based on selected timeframe (seconds)
-    shouldClose = (epoch - currentCandle.startEpoch) >= getAnalysisCandleSeconds();
-  }
 
-  if(shouldClose){
-    const closedCandle = {...currentCandle};
-    candles.push(closedCandle);
-    if(candles.length > 200) candles.shift();
+    if(shouldClose){
+      candles.push({...currentCandle});
+      if(candles.length > 200) candles.shift();
+      currentCandle = null;
+      tickCount = 0;
+      document.getElementById('tickerCandles').textContent = '0 ticks';
+      if(autoBot && !eaHalted) onNewCandle();
+      saveState();
+    }
+
+  } else {
+    // ── CANDLE MODE: align to real clock boundaries ──
+    const periodSec = getAnalysisCandleSeconds();
+    const thisBoundary = getCandleBoundary(epoch, periodSec);
+
+    if(!currentCandle){
+      // Start first candle aligned to current boundary
+      currentCandle = {open:price,high:price,low:price,close:price,epoch,ticks:1,startEpoch:thisBoundary,boundary:thisBoundary};
+      tickCount = 1;
+    } else {
+      // If epoch has crossed into a new boundary → close current candle first
+      if(thisBoundary > currentCandle.boundary){
+        candles.push({...currentCandle});
+        if(candles.length > 200) candles.shift();
+        document.getElementById('tickerCandles').textContent = candles.length;
+        if(autoBot && !eaHalted) onNewCandle();
+        saveState();
+        // Open new candle at new boundary, opening at this tick's price
+        currentCandle = {open:price,high:price,low:price,close:price,epoch,ticks:1,startEpoch:thisBoundary,boundary:thisBoundary};
+        tickCount = 1;
+      } else {
+        // Same boundary — update current candle
+        currentCandle.high  = Math.max(currentCandle.high, price);
+        currentCandle.low   = Math.min(currentCandle.low, price);
+        currentCandle.close = price;
+        tickCount++;
+        currentCandle.ticks = tickCount;
+      }
+    }
+    // Show completed candle count
     document.getElementById('tickerCandles').textContent = candles.length;
-    currentCandle = null;
-    tickCount = 0;
-    // Only run CRT signal detection if autoBot is active and EA not halted
-    if(autoBot && !eaHalted) onNewCandle();
-    saveState();
   }
 }
 
@@ -1756,15 +1788,18 @@ function setAnalysisCandle(mode, el){
   if(mode === 'tick'){
     tfRow.classList.remove('visible');
     badge.textContent = 'TICK';
+    document.getElementById('tickerCandles').textContent = '0 ticks';
+    document.getElementById('candlesLbl').textContent = 'Ticks (cur)';
   } else {
     tfRow.classList.add('visible');
     badge.textContent = 'CANDLE · '+analysisCandleTF.toUpperCase();
+    document.getElementById('tickerCandles').textContent = '0';
+    document.getElementById('candlesLbl').textContent = 'Candles';
   }
 
-  // Reset candle buffer when analysis mode changes
+  // Full reset of candle buffer
   candles = []; currentCandle = null; tickCount = 0;
-  document.getElementById('tickerCandles').textContent = '0';
-  toast('Analysis candle → '+(mode==='tick'?'TICK':'CANDLE · '+analysisCandleTF),'info');
+  toast('Analysis → '+(mode==='tick'?'TICK MODE (5-tick candles)':'CANDLE MODE · '+analysisCandleTF),'info');
   saveState();
 }
 
@@ -1774,10 +1809,10 @@ function setAnalysisTF(tf, el){
   el.classList.add('active');
   document.getElementById('acModeBadge').textContent = 'CANDLE · '+tf.toUpperCase();
 
-  // Reset candle buffer when timeframe changes
+  // Full reset so new candles align to the new timeframe from now
   candles = []; currentCandle = null; tickCount = 0;
   document.getElementById('tickerCandles').textContent = '0';
-  toast('Analysis candle TF → '+tf,'info');
+  toast('Timeframe → '+tf+' (candles align to clock boundaries)','info');
   saveState();
 }
 
